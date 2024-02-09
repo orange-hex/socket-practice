@@ -2,14 +2,18 @@
 #include "sender.hpp"
 
 #include <algorithm>
-#include <chrono>
+#include <arpa/inet.h>
+#include <asm-generic/errno.h>
 #include <condition_variable>
 #include <cstdio>
-#include <future>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
-#include <memory>
 #include <mutex>
+#include <netinet/in.h>
 #include <string>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <thread>
 
 bool is_even(const char c) {
@@ -17,14 +21,24 @@ bool is_even(const char c) {
     return (i % 2 == 0);
 };
 
+int Sender::create_socket() { return socket(AF_INET, SOCK_STREAM, 0); }
+
+sockaddr_in Sender::create_address(in_port_t port) {
+    sockaddr_in result;
+
+    result.sin_family = AF_INET;
+    result.sin_port = port;
+    result.sin_addr.s_addr = INADDR_ANY;
+
+    return result;
+}
+
 bool Sender::validate(const std::string& input) {
-    printf("\t\t\tReader::validate() called.\n");
     return std::all_of(input.begin(), input.end(), ::isdigit) &&
            input.size() <= 64;
 }
 
 void Sender::format(std::string& input, const std::string& rep) {
-    printf("\t\t\tReader::format() called.\n");
     std::sort(input.rbegin(), input.rend());
 
     for (size_t pos = 0; pos < input.length(); pos++) {
@@ -37,7 +51,6 @@ void Sender::format(std::string& input, const std::string& rep) {
 }
 
 void Sender::read() {
-    printf("\t\tReader::read() called.\n");
     std::string input;
     std::cout << "Input up to 64 digits:" << std::endl;
 
@@ -49,60 +62,67 @@ void Sender::read() {
 
             // Push data to processing thread
             std::lock_guard<std::mutex> lock(this->buf_lock);
-            this->buffer.push(
-                std::unique_ptr<std::string>(new std::string(input)));
+            this->buffer.push(input);
             this->buf_cv.notify_one();
 
-            printf("\t\tReader::read() sent data.\n");
         } else {
             std::cout << "Incorrect input!" << std::endl;
         }
     }
-    printf("\t\tReader::read() exited.\n");
 }
 
 void Sender::process() {
-    printf("\t\tReader::process() called.\n");
     while (true) {
-        std::unique_ptr<std::string> data;
+        std::string data;
 
         // Wait for data to arrive
         std::unique_lock<std::mutex> lock(this->buf_lock);
         this->buf_cv.wait(lock, [this] { return !buffer.empty(); });
 
-        printf("\t\tReader::process() received data.\n");
-
-        data = std::move(this->buffer.front());
+        data = this->buffer.front();
         this->buffer.pop();
-
-        std::cout << *data.get() << std::endl;
 
         lock.unlock();
 
-        printf("\t\tReader::process() released lock.\n");
+        while (!this->connected) {
+            request_connection();
+        }
 
-        // Send data to Receiver
-        // TODO: Send data
+        if (send(receiver_fd, data.c_str(), strlen(data.c_str()), 0) < 0) {
+            perror("send");
+        } else {
+            std::cout << "Sending " << data << std::endl;
+        }
+
+        ssize_t res;
+        if (recv(receiver_fd, &res, sizeof(res), 0) == 0) {
+            std::cout << "Disconnected from receiver." << std::endl;
+            this->connected = false;
+            close(receiver_fd);
+            this->receiver_fd = create_socket();
+        }
     }
-    printf("\t\tReader::process() exited.\n");
+}
+
+void Sender::request_connection() {
+    if (connect(receiver_fd, (struct sockaddr*)&this->address,
+                sizeof(this->address)) < 0) {
+        // perror("connect");
+    } else {
+        std::cout << "Connected to receiver." << std::endl;
+        this->connected = true;
+    }
 }
 
 void Sender::start() {
-    printf("\tReader::start() called.\n");
+    if (this->receiver_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
 
     std::thread reader(&Sender::read, this);
     std::thread processor(&Sender::process, this);
 
     reader.join();
     processor.join();
-}
-
-void Sender::start_detached() {
-    printf("\tReader::start_detached() called.\n");
-
-    std::thread reader(&Sender::read, this);
-    std::thread processor(&Sender::process, this);
-
-    reader.detach();
-    processor.detach();
 }

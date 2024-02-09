@@ -4,12 +4,8 @@
 #include "sender.hpp"
 
 int main() {
-    printf("main() called.\n");
-
-    Sender s("KB");
+    Sender s("KB", 8080);
     s.start();
-
-    printf("main() exited.\n");
 
     return 0;
 }
